@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Event4U Print Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="header-content">
+        <h1>Event4U Print Agent</h1>
+        <div class="status-indicator" id="statusIndicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Disconnesso</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="status">Stato</button>
+        <button class="tab-btn" data-tab="config">Configurazione</button>
+        <button class="tab-btn" data-tab="logs">Log</button>
+      </div>
+
+      <div class="tab-content" id="tab-status">
+        <div class="card">
+          <h2>Stato Connessione</h2>
+          <div class="status-grid">
+            <div class="status-item">
+              <label>Server</label>
+              <span id="statusServer">Disconnesso</span>
+            </div>
+            <div class="status-item">
+              <label>Stampante</label>
+              <span id="statusPrinter">Non configurata</span>
+            </div>
+            <div class="status-item">
+              <label>Ultimo Heartbeat</label>
+              <span id="statusHeartbeat">-</span>
+            </div>
+            <div class="status-item">
+              <label>Lavori in Coda</label>
+              <span id="statusJobs">0</span>
+            </div>
+          </div>
+          
+          <div class="actions">
+            <button id="btnConnect" class="btn btn-primary">Connetti</button>
+            <button id="btnDisconnect" class="btn btn-secondary" disabled>Disconnetti</button>
+            <button id="btnTestPrint" class="btn btn-secondary">Stampa Test</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-content hidden" id="tab-config">
+        <div class="card">
+          <h2>Configurazione</h2>
+          <form id="configForm">
+            <div class="form-group">
+              <label for="serverUrl">URL Server</label>
+              <input type="text" id="serverUrl" placeholder="wss://manage.eventfouryou.com">
+            </div>
+            <div class="form-group">
+              <label for="companyId">ID Azienda</label>
+              <input type="text" id="companyId" placeholder="Inserisci ID azienda">
+              <small>Chiedi all'amministratore l'ID della tua azienda</small>
+            </div>
+            <div class="form-group">
+              <label for="printerName">Nome Stampante</label>
+              <input type="text" id="printerName" placeholder="es. XP-420B">
+              <small>Nome della stampante come appare nel sistema operativo</small>
+            </div>
+            <div class="form-group checkbox">
+              <input type="checkbox" id="autoConnect" checked>
+              <label for="autoConnect">Connetti automaticamente all'avvio</label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Salva Configurazione</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="tab-content hidden" id="tab-logs">
+        <div class="card">
+          <h2>Log Attività</h2>
+          <div class="log-container" id="logContainer">
+            <div class="log-empty">Nessun log disponibile</div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
