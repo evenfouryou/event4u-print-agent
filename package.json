@@ -23,7 +23,6 @@
       "!dist/**"
     ],
     "win": {
-      "icon": "icon.png",
       "target": [
         {
           "target": "nsis",
@@ -32,15 +31,12 @@
       ]
     },
     "mac": {
-      "icon": "icon.png",
       "target": ["dmg"]
     },
     "nsis": {
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "icon.png",
-      "uninstallerIcon": "icon.png",
       "shortcutName": "Event4U Print Agent"
     }
   },
