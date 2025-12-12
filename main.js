@@ -1,423 +1,322 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
-const os = require('os');
 const WebSocket = require('ws');
 const Store = require('electron-store');
 
-const log = require('electron-log');
-log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'event4u-print-agent.log');
-log.transports.file.level = 'debug';
-log.transports.console.level = 'debug';
+const store = new Store();
 
-const gotTheLock = app.requestSingleInstanceLock();
+// HARDCODED SERVER URL
+const SERVER_URL = 'https://manage.eventfouryou.com';
+const WS_URL = 'wss://manage.eventfouryou.com/ws/print-agent';
+const API_URL = 'https://manage.eventfouryou.com/api/printers/agents/connect';
 
-if (!gotTheLock) {
-  log.info('Another instance is already running. Quitting...');
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
-}
-
-log.info('='.repeat(60));
-log.info('Event4U Print Agent starting at', new Date().toISOString());
-log.info('App version:', app.getVersion());
-log.info('Platform:', process.platform, process.arch);
-log.info('='.repeat(60));
-
-const store = new Store({
-  defaults: {
-    serverUrl: 'wss://manage.eventfouryou.com',
-    companyId: '',
-    authToken: '',
-    printerName: '',
-    autoConnect: true
-  }
-});
-
-let mainWindow = null;
-let relayWs = null;
-let relayReconnectTimer = null;
-let heartbeatTimer = null;
-let agentId = null;
-
-const HEARTBEAT_INTERVAL = 30000;
-const RECONNECT_DELAY = 5000;
-
-let currentStatus = {
-  connected: false,
-  printerReady: false,
-  printerName: null,
-  lastHeartbeat: null,
-  pendingJobs: 0
-};
-
-let logBuffer = [];
-const MAX_LOG_BUFFER = 200;
-
-function addLog(level, message) {
-  const entry = { timestamp: new Date().toISOString(), level, message };
-  logBuffer.push(entry);
-  if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
-  if (mainWindow?.webContents) {
-    mainWindow.webContents.send('log:entry', entry);
-  }
-}
-
-const originalInfo = log.info.bind(log);
-const originalWarn = log.warn.bind(log);
-const originalError = log.error.bind(log);
-
-log.info = (...args) => {
-  originalInfo(...args);
-  addLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
-};
-log.warn = (...args) => {
-  originalWarn(...args);
-  addLog('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
-};
-log.error = (...args) => {
-  originalError(...args);
-  addLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
-};
+let mainWindow;
+let tray;
+let ws;
+let reconnectTimer;
+let isConnected = false;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
+    width: 500,
     height: 600,
-    minWidth: 700,
-    minHeight: 500,
+    resizable: false,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      nodeIntegration: true,
+      contextIsolation: false
     },
-    icon: path.join(__dirname, 'icon.png'),
-    title: 'Event4U Print Agent'
+    icon: path.join(__dirname, 'icon.png')
   });
 
   mainWindow.loadFile('index.html');
   
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  mainWindow.on('close', (e) => {
+    if (!app.isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
   });
 }
 
-function getDeviceName() {
-  return os.hostname();
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
+  tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Apri', click: () => mainWindow.show() },
+    { label: 'Stato', sublabel: isConnected ? 'Connesso' : 'Disconnesso' },
+    { type: 'separator' },
+    { label: 'Esci', click: () => { app.isQuitting = true; app.quit(); } }
+  ]);
+  
+  tray.setToolTip('Event4U Print Agent');
+  tray.setContextMenu(contextMenu);
+  tray.on('click', () => mainWindow.show());
 }
 
-async function registerAgent() {
-  const companyId = store.get('companyId');
-  const printerName = store.get('printerName');
+async function connectToServer() {
+  const token = store.get('token');
   
-  if (!companyId) {
-    log.warn('No company ID configured');
-    return null;
-  }
-
-  const serverUrl = store.get('serverUrl').replace('wss://', 'https://').replace('ws://', 'http://');
-  
-  try {
-    const response = await fetch(`${serverUrl}/api/printers/agents/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        companyId,
-        deviceName: getDeviceName(),
-        printerName,
-        capabilities: {
-          thermalPrint: true,
-          paperWidth: 80
-        }
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Registration failed: ${response.status}`);
-    }
-
-    const agent = await response.json();
-    log.info('Agent registered:', agent.id);
-    
-    store.set('authToken', agent.authToken);
-    agentId = agent.id;
-    
-    return agent;
-  } catch (error) {
-    log.error('Registration error:', error.message);
-    return null;
-  }
-}
-
-function connectToRelay() {
-  const serverUrl = store.get('serverUrl');
-  const authToken = store.get('authToken');
-  const companyId = store.get('companyId');
-  
-  if (!companyId) {
-    log.warn('Cannot connect: no company ID configured');
-    updateStatus({ connected: false });
+  if (!token) {
+    sendToRenderer('log', 'Token mancante');
+    sendToRenderer('status', 'disconnected');
     return;
   }
 
-  if (relayWs) {
-    try { relayWs.close(); } catch (e) { }
-    relayWs = null;
-  }
-
-  log.info('Connecting to relay server:', serverUrl);
-
+  sendToRenderer('log', 'Connessione in corso...');
+  
   try {
-    relayWs = new WebSocket(`${serverUrl}/ws/print-agent`);
-
-    relayWs.on('open', () => {
-      log.info('Connected to relay server');
-      
-      relayWs.send(JSON.stringify({
-        type: 'auth',
-        payload: {
-          token: authToken,
-          companyId,
-          agentId,
-          deviceName: getDeviceName()
-        }
-      }));
-
-      updateStatus({ connected: true });
-      startHeartbeat();
+    // First verify credentials via HTTP - only send token, server returns companyId
+    const response = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
     });
-
-    relayWs.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        handleRelayMessage(message);
-      } catch (error) {
-        log.error('Failed to parse relay message:', error.message);
-      }
-    });
-
-    relayWs.on('close', () => {
-      log.warn('Relay connection closed');
-      updateStatus({ connected: false });
-      stopHeartbeat();
-      scheduleReconnect();
-    });
-
-    relayWs.on('error', (error) => {
-      log.error('Relay connection error:', error.message);
-      updateStatus({ connected: false });
-    });
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Errore sconosciuto' }));
+      sendToRenderer('log', `Errore autenticazione: ${error.error || response.status}`);
+      sendToRenderer('status', 'error');
+      return;
+    }
+    
+    const data = await response.json();
+    sendToRenderer('log', `Autenticato come: ${data.deviceName || data.agentId}`);
+    store.set('agentId', data.agentId);
+    store.set('companyId', data.companyId); // Store from server (trusted)
+    
+    // Now connect via WebSocket
+    connectWebSocket(token, data.companyId, data.agentId);
+    
   } catch (error) {
-    log.error('Failed to connect to relay:', error.message);
+    sendToRenderer('log', `Errore connessione: ${error.message}`);
+    sendToRenderer('status', 'error');
     scheduleReconnect();
   }
 }
 
-function handleRelayMessage(message) {
-  log.info('Relay message:', message.type);
+function connectWebSocket(token, companyId, agentId) {
+  if (ws) {
+    ws.close();
+  }
+  
+  ws = new WebSocket(WS_URL);
+  
+  ws.on('open', () => {
+    sendToRenderer('log', 'WebSocket connesso, autenticazione...');
+    
+    ws.send(JSON.stringify({
+      type: 'auth',
+      payload: {
+        token,
+        companyId,
+        agentId,
+        deviceName: store.get('deviceName') || 'Print Agent'
+      }
+    }));
+  });
+  
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data.toString());
+      handleMessage(message);
+    } catch (e) {
+      sendToRenderer('log', `Errore parsing messaggio: ${e.message}`);
+    }
+  });
+  
+  ws.on('close', () => {
+    sendToRenderer('log', 'WebSocket disconnesso');
+    sendToRenderer('status', 'disconnected');
+    isConnected = false;
+    scheduleReconnect();
+  });
+  
+  ws.on('error', (error) => {
+    sendToRenderer('log', `Errore WebSocket: ${error.message}`);
+    sendToRenderer('status', 'error');
+  });
+}
 
+function handleMessage(message) {
   switch (message.type) {
     case 'auth_success':
-      log.info('Authentication successful');
+      sendToRenderer('log', `Registrato! Agent ID: ${message.agentId}`);
+      sendToRenderer('status', 'connected');
+      isConnected = true;
       break;
-
+      
     case 'auth_error':
-      log.error('Authentication failed:', message.error);
+      sendToRenderer('log', `Errore autenticazione: ${message.error}`);
+      sendToRenderer('status', 'error');
       break;
-
+      
     case 'print_job':
+      sendToRenderer('log', `Lavoro di stampa ricevuto: ${message.payload?.id}`);
       handlePrintJob(message.payload);
       break;
-
-    case 'ping':
-      relayWs?.send(JSON.stringify({ type: 'pong' }));
-      break;
-
+      
     default:
-      log.warn('Unknown message type:', message.type);
+      sendToRenderer('log', `Messaggio: ${message.type}`);
   }
 }
 
 async function handlePrintJob(job) {
-  log.info('Received print job:', job.id);
-  updateStatus({ pendingJobs: currentStatus.pendingJobs + 1 });
-
-  try {
-    sendJobStatus(job.id, 'printing');
-
-    const result = await printTicket(job.payload);
-    
-    if (result.success) {
-      sendJobStatus(job.id, 'completed');
-      log.info('Print job completed:', job.id);
-    } else {
-      sendJobStatus(job.id, 'failed', result.error);
-      log.error('Print job failed:', job.id, result.error);
-    }
-  } catch (error) {
-    sendJobStatus(job.id, 'failed', error.message);
-    log.error('Print job error:', error.message);
-  }
-
-  updateStatus({ pendingJobs: Math.max(0, currentStatus.pendingJobs - 1) });
-}
-
-async function printTicket(payload) {
   const printerName = store.get('printerName');
   
   if (!printerName) {
-    return { success: false, error: 'No printer configured' };
+    sendToRenderer('log', 'Nessuna stampante configurata');
+    sendJobStatus(job.id, 'error', 'Nessuna stampante configurata');
+    return;
   }
-
-  log.info('Printing to:', printerName);
-  log.info('Payload:', JSON.stringify(payload).substring(0, 200));
-
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
-  return { success: true };
-}
-
-function sendJobStatus(jobId, status, errorMessage = null) {
-  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return;
-
-  relayWs.send(JSON.stringify({
-    type: 'job_status',
-    payload: {
-      jobId,
-      status,
-      errorMessage
+  
+  sendToRenderer('log', `Stampa su: ${printerName}`);
+  
+  try {
+    // Get list of printers
+    const printers = await mainWindow.webContents.getPrintersAsync();
+    const printer = printers.find(p => p.name === printerName);
+    
+    if (!printer) {
+      sendToRenderer('log', `Stampante non trovata: ${printerName}`);
+      sendJobStatus(job.id, 'error', 'Stampante non trovata');
+      return;
     }
-  }));
-}
-
-function startHeartbeat() {
-  stopHeartbeat();
-  heartbeatTimer = setInterval(() => {
-    if (relayWs?.readyState === WebSocket.OPEN) {
-      relayWs.send(JSON.stringify({
-        type: 'heartbeat',
-        payload: {
-          agentId,
-          status: currentStatus.printerReady ? 'online' : 'error',
-          printerName: currentStatus.printerName
+    
+    // For thermal printers, we need to handle the payload
+    // This is a simplified version - actual implementation depends on printer type
+    if (job.type === 'ticket' || job.type === 'test') {
+      // Create a hidden window to print
+      const printWindow = new BrowserWindow({ show: false });
+      
+      const htmlContent = generatePrintHtml(job);
+      await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+      
+      printWindow.webContents.print({
+        silent: true,
+        deviceName: printerName,
+        printBackground: true
+      }, (success, errorType) => {
+        printWindow.close();
+        
+        if (success) {
+          sendToRenderer('log', 'Stampa completata');
+          sendJobStatus(job.id, 'completed');
+        } else {
+          sendToRenderer('log', `Errore stampa: ${errorType}`);
+          sendJobStatus(job.id, 'error', errorType);
         }
-      }));
-      updateStatus({ lastHeartbeat: new Date().toISOString() });
+      });
     }
-  }, HEARTBEAT_INTERVAL);
+  } catch (error) {
+    sendToRenderer('log', `Errore stampa: ${error.message}`);
+    sendJobStatus(job.id, 'error', error.message);
+  }
 }
 
-function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
+function generatePrintHtml(job) {
+  if (job.type === 'test') {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: monospace; font-size: 12px; margin: 0; padding: 10px; }
+          h1 { font-size: 14px; margin: 0 0 10px 0; }
+        </style>
+      </head>
+      <body>
+        <h1>Event4U Print Agent - Test</h1>
+        <p>Stampante: ${store.get('printerName')}</p>
+        <p>Data: ${new Date().toLocaleString('it-IT')}</p>
+        <p>Status: OK</p>
+      </body>
+      </html>
+    `;
+  }
+  
+  // For tickets, use the template from the job payload
+  return job.html || `<html><body><pre>${JSON.stringify(job, null, 2)}</pre></body></html>`;
+}
+
+function sendJobStatus(jobId, status, errorMessage) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'job_status',
+      payload: { jobId, status, errorMessage }
+    }));
   }
 }
 
 function scheduleReconnect() {
-  if (relayReconnectTimer) return;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
   
-  log.info(`Reconnecting in ${RECONNECT_DELAY / 1000}s...`);
-  relayReconnectTimer = setTimeout(() => {
-    relayReconnectTimer = null;
-    connectToRelay();
-  }, RECONNECT_DELAY);
+  reconnectTimer = setTimeout(() => {
+    sendToRenderer('log', 'Riconnessione...');
+    connectToServer();
+  }, 5000);
 }
 
-function updateStatus(updates) {
-  Object.assign(currentStatus, updates);
-  if (mainWindow?.webContents) {
-    mainWindow.webContents.send('status:update', currentStatus);
+function sendToRenderer(channel, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, data);
   }
 }
+
+// IPC handlers
+ipcMain.handle('save-config', (event, config) => {
+  store.set('token', config.token);
+  store.set('deviceName', config.deviceName);
+  store.set('printerName', config.printerName);
+  sendToRenderer('log', 'Configurazione salvata');
+  return true;
+});
 
 ipcMain.handle('get-config', () => {
   return {
-    serverUrl: store.get('serverUrl'),
-    companyId: store.get('companyId'),
-    printerName: store.get('printerName'),
-    autoConnect: store.get('autoConnect')
+    token: store.get('token') || '',
+    deviceName: store.get('deviceName') || '',
+    printerName: store.get('printerName') || '',
+    serverUrl: SERVER_URL
   };
 });
 
-ipcMain.handle('save-config', async (event, config) => {
-  store.set('serverUrl', config.serverUrl);
-  store.set('companyId', config.companyId);
-  store.set('printerName', config.printerName);
-  store.set('autoConnect', config.autoConnect);
-  
-  updateStatus({ printerName: config.printerName, printerReady: !!config.printerName });
-  
-  log.info('Configuration saved');
-  return { success: true };
-});
-
-ipcMain.handle('get-status', () => currentStatus);
-
-ipcMain.handle('get-logs', () => logBuffer);
-
-ipcMain.handle('connect', async () => {
-  const agent = await registerAgent();
-  if (agent) {
-    connectToRelay();
-    return { success: true };
-  }
-  return { success: false, error: 'Registration failed' };
+ipcMain.handle('connect', () => {
+  connectToServer();
 });
 
 ipcMain.handle('disconnect', () => {
-  if (relayWs) {
-    relayWs.close();
-    relayWs = null;
-  }
-  stopHeartbeat();
-  updateStatus({ connected: false });
-  return { success: true };
+  if (ws) ws.close();
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  sendToRenderer('status', 'disconnected');
+});
+
+ipcMain.handle('get-printers', async () => {
+  const printers = await mainWindow.webContents.getPrintersAsync();
+  return printers.map(p => ({ name: p.name, isDefault: p.isDefault }));
 });
 
 ipcMain.handle('test-print', async () => {
   const printerName = store.get('printerName');
   if (!printerName) {
-    return { success: false, error: 'No printer configured' };
+    sendToRenderer('log', 'Seleziona una stampante');
+    return false;
   }
   
-  log.info('Test print requested');
-  
-  const result = await printTicket({
-    type: 'test',
-    text: 'Event4U Print Agent - Test\n\nPrinter: ' + printerName + '\nDate: ' + new Date().toLocaleString()
-  });
-  
-  return result;
+  handlePrintJob({ type: 'test', id: 'test-' + Date.now() });
+  return true;
 });
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   createWindow();
-
-  const config = store.store;
-  updateStatus({
-    printerName: config.printerName,
-    printerReady: !!config.printerName
-  });
-
-  if (config.autoConnect && config.companyId) {
-    log.info('Auto-connecting...');
-    const agent = await registerAgent();
-    if (agent) {
-      connectToRelay();
-    }
+  createTray();
+  
+  // Auto-connect if config exists
+  const token = store.get('token');
+  const companyId = store.get('companyId');
+  if (token && companyId) {
+    setTimeout(connectToServer, 1000);
   }
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
 });
 
 app.on('window-all-closed', () => {
@@ -426,9 +325,13 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
-  if (relayWs) {
-    relayWs.close();
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
   }
-  stopHeartbeat();
+});
+
+app.on('before-quit', () => {
+  if (ws) ws.close();
+  if (reconnectTimer) clearTimeout(reconnectTimer);
 });
