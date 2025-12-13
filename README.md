@@ -1,48 +1,56 @@
 # Event4U Print Agent
 
-App desktop per la stampa termica di biglietti SIAE-compliant.
+Desktop application for thermal ticket printing with Event4U management system.
 
-## URL Server Integrato
-`https://manage.eventfouryou.com`
+## Supported Printers
 
-## Installazione Sviluppo
+- X PRINTER XP-420B (80mm thermal)
+- Any ESC/POS compatible thermal printer
 
+## Installation
+
+### Prerequisites
+- Node.js 18+
+- Windows 10/11 or macOS
+
+### Development
 ```bash
-cd print-agent-desktop
 npm install
 npm start
 ```
 
-## Compilazione Eseguibile
-
-### Windows
+### Build for Distribution
 ```bash
+# Windows
 npm run build:win
-```
-L'eseguibile sarà in `dist/Event4U Print Agent Setup.exe`
 
-### Mac
-```bash
+# macOS
 npm run build:mac
 ```
-Il file .dmg sarà in `dist/`
 
-## Configurazione
+## Configuration
 
-1. **Nel sito web Event4U** (come admin/gestore):
-   - Vai a "Impostazioni Stampanti"
-   - Clicca "Registra Nuovo Agente"
-   - Inserisci il nome del dispositivo
-   - Copia il **TOKEN** generato
+1. Launch the application
+2. Go to "Configurazione" tab
+3. Enter:
+   - **URL Server**: `wss://manage.eventfouryou.com` (default)
+   - **ID Azienda**: Your company ID (ask your administrator)
+   - **Nome Stampante**: Printer name as shown in OS settings
+4. Click "Salva Configurazione"
+5. Click "Connetti" to establish connection
 
-2. **Nel Print Agent**:
-   - Incolla il Token
-   - Inserisci un nome dispositivo (es. "Cassa 1")
-   - Seleziona la stampante termica
-   - Clicca "Salva e Connetti"
+## Features
 
-Il Company ID viene recuperato automaticamente dal server.
+- Automatic reconnection on connection loss
+- Heartbeat monitoring for connection health
+- Print queue management
+- Test print functionality
+- Activity logging
 
-## Requisiti
-- Node.js 18+
-- Una stampante termica (es. XP-420B, XP-208P, Epson TM-T88)
+## Architecture
+
+The Print Agent connects to the Event4U server via WebSocket relay and receives print jobs from the web application. Jobs are printed to the configured thermal printer using ESC/POS commands.
+
+```
+[Event4U Web App] → [WebSocket Relay] → [Print Agent] → [Thermal Printer]
+```
