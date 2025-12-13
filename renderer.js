@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const configForm = document.getElementById('configForm');
   const serverUrlInput = document.getElementById('serverUrl');
   const companyIdInput = document.getElementById('companyId');
+  const authTokenInput = document.getElementById('authToken');
   const printerNameInput = document.getElementById('printerName');
   const autoConnectInput = document.getElementById('autoConnect');
   
@@ -35,6 +36,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const config = await window.printAgent.getConfig();
     serverUrlInput.value = config.serverUrl || '';
     companyIdInput.value = config.companyId || '';
+    authTokenInput.value = config.authToken || '';
     printerNameInput.value = config.printerName || '';
     autoConnectInput.checked = config.autoConnect !== false;
   }
@@ -143,6 +145,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const config = {
       serverUrl: serverUrlInput.value.trim(),
       companyId: companyIdInput.value.trim(),
+      authToken: authTokenInput.value.trim(),
       printerName: printerNameInput.value.trim(),
       autoConnect: autoConnectInput.checked
     };
