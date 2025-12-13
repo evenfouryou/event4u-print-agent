@@ -410,8 +410,8 @@ async function printTicket(payload) {
     // Load HTML content
     await printWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
     
-    // Wait for images/QR codes to load
-    await new Promise(resolve => setTimeout(resolve, 800));
+    // Wait for images/QR codes to load (increased for external QR service)
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Calculate page size in microns (mm * 1000)
     const widthMicrons = (payload.paperWidthMm || 80) * 1000;
