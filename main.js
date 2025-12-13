@@ -1,62 +1,8 @@
-const { app, BrowserWindow, ipcMain, net } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
 const WebSocket = require('ws');
 const Store = require('electron-store');
-
-// Use Electron's net module for HTTP requests (works on all platforms)
-async function electronFetch(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const request = net.request({
-      method: options.method || 'GET',
-      url: url
-    });
-    
-    if (options.headers) {
-      Object.entries(options.headers).forEach(([key, value]) => {
-        request.setHeader(key, value);
-      });
-    }
-    
-    let responseData = '';
-    
-    request.on('response', (response) => {
-      response.on('data', (chunk) => {
-        responseData += chunk.toString();
-      });
-      
-      response.on('end', () => {
-        resolve({
-          ok: response.statusCode >= 200 && response.statusCode < 300,
-          status: response.statusCode,
-          json: () => {
-            try {
-              if (!responseData || responseData.trim() === '') {
-                return Promise.resolve({});
-              }
-              return Promise.resolve(JSON.parse(responseData));
-            } catch (e) {
-              log.error('JSON parse error:', e.message, 'Body:', responseData);
-              return Promise.resolve({ error: 'Invalid JSON response' });
-            }
-          },
-          text: () => Promise.resolve(responseData)
-        });
-      });
-    });
-    
-    request.on('error', (error) => {
-      log.error('Network error:', error.message);
-      reject(error);
-    });
-    
-    if (options.body) {
-      request.write(options.body);
-    }
-    
-    request.end();
-  });
-}
 
 const log = require('electron-log');
 log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'event4u-print-agent.log');
@@ -178,7 +124,7 @@ async function registerAgent() {
   try {
     // Use /connect endpoint which doesn't require session auth
     // Only send token - companyId comes from server (security)
-    const response = await electronFetch(`${serverUrl}/api/printers/agents/connect`, {
+    const response = await fetch(`${serverUrl}/api/printers/agents/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: authToken })
