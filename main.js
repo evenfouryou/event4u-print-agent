@@ -153,37 +153,73 @@ function getDeviceName() {
 async function registerAgent() {
   const authToken = store.get('authToken');
   
+  log.info('=== REGISTER AGENT START ===');
+  log.info('Token configured:', authToken ? `${authToken.substring(0, 8)}...${authToken.substring(authToken.length - 8)}` : 'NONE');
+  log.info('Token length:', authToken ? authToken.length : 0);
+  
   if (!authToken) {
     log.warn('No auth token configured - generate one from the web portal first');
     return null;
   }
 
-  const serverUrl = store.get('serverUrl').replace('wss://', 'https://').replace('ws://', 'http://');
+  const rawServerUrl = store.get('serverUrl');
+  const serverUrl = rawServerUrl.replace('wss://', 'https://').replace('ws://', 'http://');
+  
+  log.info('Raw server URL from config:', rawServerUrl);
+  log.info('HTTP server URL:', serverUrl);
+  
+  const fullUrl = `${serverUrl}/api/printers/agents/connect`;
+  log.info('Full request URL:', fullUrl);
   
   try {
-    // Use /connect endpoint which doesn't require session auth
-    // Only send token - companyId comes from server (security)
-    const response = await httpRequest(`${serverUrl}/api/printers/agents/connect`, {
+    log.info('Making HTTP request...');
+    const requestBody = JSON.stringify({ token: authToken });
+    log.info('Request body:', requestBody);
+    
+    const response = await httpRequest(fullUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: authToken })
+      body: requestBody
     });
 
+    log.info('Response received - Status:', response.status, 'OK:', response.ok);
+    
+    const responseText = await response.text();
+    log.info('Response body:', responseText);
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      let errorData = {};
+      try {
+        errorData = JSON.parse(responseText);
+      } catch (e) {
+        log.error('Failed to parse error response as JSON');
+      }
       throw new Error(errorData.error || `Connection failed: ${response.status}`);
     }
 
-    const agent = await response.json();
-    log.info('Agent connected:', agent.agentId);
+    let agent;
+    try {
+      agent = JSON.parse(responseText);
+    } catch (e) {
+      log.error('Failed to parse success response as JSON:', e.message);
+      throw new Error('Invalid JSON response from server');
+    }
+    
+    log.info('Agent connected successfully!');
+    log.info('Agent ID:', agent.agentId);
+    log.info('Company ID:', agent.companyId);
+    log.info('Device Name:', agent.deviceName);
     
     agentId = agent.agentId;
-    // Store companyId from server response (trusted source)
     store.set('companyId', agent.companyId);
     
+    log.info('=== REGISTER AGENT SUCCESS ===');
     return agent;
   } catch (error) {
-    log.error('Registration error:', error.message);
+    log.error('=== REGISTER AGENT FAILED ===');
+    log.error('Error type:', error.constructor.name);
+    log.error('Error message:', error.message);
+    log.error('Error stack:', error.stack);
     return null;
   }
 }
