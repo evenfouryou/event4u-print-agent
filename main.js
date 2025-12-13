@@ -51,7 +51,7 @@ function updateTrayMenu() {
   const statusLabel = isConnected ? '● Connesso' : '○ Disconnesso';
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Event4U Print Agent', enabled: false },
+    { label: 'Event4U Print Agent v1.3', enabled: false },
     { type: 'separator' },
     { label: statusLabel, enabled: false },
     { type: 'separator' },
@@ -61,7 +61,7 @@ function updateTrayMenu() {
     { label: 'Esci', click: () => { app.isQuitting = true; app.quit(); } }
   ]);
 
-  tray.setToolTip(`Event4U Print Agent - ${isConnected ? 'Connesso' : 'Disconnesso'}`);
+  tray.setToolTip('Event4U Print Agent v1.3 - ' + (isConnected ? 'Connesso' : 'Disconnesso'));
   tray.setContextMenu(contextMenu);
 }
 
@@ -85,20 +85,20 @@ async function connectToServer() {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: 'Errore sconosciuto' }));
-      sendToRenderer('log', `Errore autenticazione: ${error.error || response.status}`);
+      sendToRenderer('log', 'Errore autenticazione: ' + (error.error || response.status));
       sendToRenderer('status', 'error');
       return;
     }
 
     const data = await response.json();
-    sendToRenderer('log', `Autenticato come: ${data.deviceName || data.agentId}`);
+    sendToRenderer('log', 'Autenticato come: ' + (data.deviceName || data.agentId));
     store.set('agentId', data.agentId);
     store.set('companyId', data.companyId);
 
     connectWebSocket(token, data.companyId, data.agentId);
 
   } catch (error) {
-    sendToRenderer('log', `Errore connessione: ${error.message}`);
+    sendToRenderer('log', 'Errore connessione: ' + error.message);
     sendToRenderer('status', 'error');
     scheduleReconnect();
   }
@@ -130,7 +130,7 @@ function connectWebSocket(token, companyId, agentId) {
       const message = JSON.parse(data.toString());
       handleMessage(message);
     } catch (e) {
-      sendToRenderer('log', `Errore parsing messaggio: ${e.message}`);
+      sendToRenderer('log', 'Errore parsing messaggio: ' + e.message);
     }
   });
 
@@ -143,7 +143,7 @@ function connectWebSocket(token, companyId, agentId) {
   });
 
   ws.on('error', (error) => {
-    sendToRenderer('log', `Errore WebSocket: ${error.message}`);
+    sendToRenderer('log', 'Errore WebSocket: ' + error.message);
     sendToRenderer('status', 'error');
   });
 }
@@ -151,24 +151,24 @@ function connectWebSocket(token, companyId, agentId) {
 function handleMessage(message) {
   switch (message.type) {
     case 'auth_success':
-      sendToRenderer('log', `Registrato! Agent ID: ${message.agentId}`);
+      sendToRenderer('log', 'Registrato! Agent ID: ' + message.agentId);
       sendToRenderer('status', 'connected');
       isConnected = true;
       updateTrayMenu();
       break;
 
     case 'auth_error':
-      sendToRenderer('log', `Errore autenticazione: ${message.error}`);
+      sendToRenderer('log', 'Errore autenticazione: ' + message.error);
       sendToRenderer('status', 'error');
       break;
 
     case 'print_job':
-      sendToRenderer('log', `Lavoro di stampa ricevuto: ${message.payload?.id}`);
+      sendToRenderer('log', 'Lavoro di stampa ricevuto: ' + (message.payload?.id || 'unknown'));
       handlePrintJob(message.payload);
       break;
 
     default:
-      sendToRenderer('log', `Messaggio: ${message.type}`);
+      sendToRenderer('log', 'Messaggio: ' + message.type);
   }
 }
 
@@ -181,148 +181,146 @@ async function handlePrintJob(job) {
     return;
   }
 
-  sendToRenderer('log', `Stampa su: ${printerName}`);
-  sendToRenderer('log', `Dimensioni: ${job.paperWidthMm || 80}mm x ${job.paperHeightMm || 150}mm`);
+  const paperWidthMm = job.paperWidthMm || 80;
+  const paperHeightMm = job.paperHeightMm || 150;
+
+  sendToRenderer('log', 'Stampa su: ' + printerName);
+  sendToRenderer('log', 'Dimensioni: ' + paperWidthMm + 'mm x ' + paperHeightMm + 'mm');
 
   try {
     const printers = await mainWindow.webContents.getPrintersAsync();
     const printer = printers.find(p => p.name === printerName);
 
     if (!printer) {
-      sendToRenderer('log', `Stampante non trovata: ${printerName}`);
+      sendToRenderer('log', 'Stampante non trovata: ' + printerName);
       sendJobStatus(job.id, 'error', 'Stampante non trovata');
       return;
     }
 
     if (job.type === 'ticket' || job.type === 'test') {
-      // Create hidden window with exact dimensions
-      const paperWidthMm = job.paperWidthMm || 80;
-      const paperHeightMm = job.paperHeightMm || 150;
-      
-      // Convert mm to pixels at 96 DPI (1mm = 3.78px)
-      const widthPx = Math.round(paperWidthMm * 3.78);
-      const heightPx = Math.round(paperHeightMm * 3.78);
-      
+      // Create hidden window - DON'T set size here, let CSS handle it
       const printWindow = new BrowserWindow({ 
         show: false,
-        width: widthPx,
-        height: heightPx,
         webPreferences: {
           nodeIntegration: false
         }
       });
 
-      const htmlContent = generatePrintHtml(job);
-      await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+      const htmlContent = generatePrintHtml(job, paperWidthMm, paperHeightMm);
+      await printWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
       
-      // Wait for content to render (especially images/QR codes)
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for content to render (images, QR codes)
+      await new Promise(resolve => setTimeout(resolve, 800));
 
       // Page size in microns (1mm = 1000 microns)
       const pageWidthMicrons = paperWidthMm * 1000;
       const pageHeightMicrons = paperHeightMm * 1000;
 
-      sendToRenderer('log', `Page size: ${pageWidthMicrons} x ${pageHeightMicrons} microns`);
+      sendToRenderer('log', 'Page: ' + pageWidthMicrons + ' x ' + pageHeightMicrons + ' microns');
 
-      printWindow.webContents.print({
+      const printOptions = {
         silent: true,
         deviceName: printerName,
         printBackground: true,
-        scaleFactor: 100, // 100% = no scaling
+        color: true,
+        margins: {
+          marginType: 'none'
+        },
         pageSize: {
           width: pageWidthMicrons,
           height: pageHeightMicrons
         },
-        margins: {
-          marginType: 'none'
-        },
-        // Additional options to prevent scaling/fitting
-        shouldPrintBackgrounds: true,
-        preferCSSPageSize: true
-      }, (success, errorType) => {
+        scaleFactor: 100,
+        landscape: false,
+        pagesPerSheet: 1
+      };
+
+      sendToRenderer('log', 'Invio a stampante...');
+
+      printWindow.webContents.print(printOptions, (success, errorType) => {
         printWindow.close();
 
         if (success) {
-          sendToRenderer('log', 'Stampa completata');
+          sendToRenderer('log', 'Stampa completata!');
           sendJobStatus(job.id, 'completed');
         } else {
-          sendToRenderer('log', `Errore stampa: ${errorType}`);
+          sendToRenderer('log', 'Errore stampa: ' + errorType);
           sendJobStatus(job.id, 'error', errorType);
         }
       });
     }
   } catch (error) {
-    sendToRenderer('log', `Errore stampa: ${error.message}`);
+    sendToRenderer('log', 'Errore stampa: ' + error.message);
     sendJobStatus(job.id, 'error', error.message);
   }
 }
 
-function generatePrintHtml(job) {
-  const paperWidthMm = job.paperWidthMm || 80;
-  const paperHeightMm = job.paperHeightMm || 150;
+function generatePrintHtml(job, paperWidthMm, paperHeightMm) {
+  // Convert mm to pixels at 96 DPI (standard screen DPI)
+  // 1 inch = 25.4mm, 96 DPI means 96/25.4 = 3.78 pixels per mm
   const widthPx = Math.round(paperWidthMm * 3.78);
   const heightPx = Math.round(paperHeightMm * 3.78);
 
   if (job.type === 'test') {
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          @page {
-            size: ${paperWidthMm}mm ${paperHeightMm}mm;
-            margin: 0;
-          }
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          html, body { 
-            width: ${widthPx}px; 
-            height: ${heightPx}px;
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-          }
-          .container {
-            width: 100%;
-            height: 100%;
-            padding: 10px;
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-          }
-          h1 { font-size: 14px; margin: 0 0 10px 0; }
-          p { margin: 5px 0; }
-          .border { 
-            border: 2px dashed #000; 
-            position: absolute;
-            top: 2px; left: 2px; right: 2px; bottom: 2px;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="border"></div>
-        <div class="container">
-          <h1>Event4U Print Agent - Test</h1>
-          <p><strong>Stampante:</strong> ${store.get('printerName')}</p>
-          <p><strong>Dimensioni:</strong> ${paperWidthMm}mm x ${paperHeightMm}mm</p>
-          <p><strong>Data:</strong> ${new Date().toLocaleString('it-IT')}</p>
-          <p><strong>Status:</strong> OK</p>
-        </div>
-      </body>
-      </html>
-    `;
+    return '<!DOCTYPE html>' +
+      '<html>' +
+      '<head>' +
+      '<meta charset="utf-8">' +
+      '<style>' +
+      '@page { size: ' + paperWidthMm + 'mm ' + paperHeightMm + 'mm; margin: 0; }' +
+      '@media print { html, body { width: ' + paperWidthMm + 'mm; height: ' + paperHeightMm + 'mm; } }' +
+      '* { margin: 0; padding: 0; box-sizing: border-box; }' +
+      'html, body { ' +
+      '  width: ' + widthPx + 'px; ' +
+      '  height: ' + heightPx + 'px; ' +
+      '  margin: 0; padding: 0; ' +
+      '  overflow: hidden; ' +
+      '  -webkit-print-color-adjust: exact; ' +
+      '  print-color-adjust: exact; ' +
+      '}' +
+      '.border { ' +
+      '  position: absolute; ' +
+      '  top: 3px; left: 3px; right: 3px; bottom: 3px; ' +
+      '  border: 2px dashed #333; ' +
+      '}' +
+      '.content { ' +
+      '  position: absolute; ' +
+      '  top: 15px; left: 15px; ' +
+      '  font-family: Arial, sans-serif; ' +
+      '  font-size: 11px; ' +
+      '}' +
+      'h1 { font-size: 14px; margin-bottom: 8px; }' +
+      'p { margin: 4px 0; }' +
+      '</style>' +
+      '</head>' +
+      '<body>' +
+      '<div class="border"></div>' +
+      '<div class="content">' +
+      '<h1>Event4U Print Agent v1.3</h1>' +
+      '<p><strong>Stampante:</strong> ' + store.get('printerName') + '</p>' +
+      '<p><strong>Dimensioni:</strong> ' + paperWidthMm + 'mm x ' + paperHeightMm + 'mm</p>' +
+      '<p><strong>Pixel:</strong> ' + widthPx + ' x ' + heightPx + '</p>' +
+      '<p><strong>Data:</strong> ' + new Date().toLocaleString('it-IT') + '</p>' +
+      '<p><strong>Status:</strong> OK</p>' +
+      '<p style="margin-top: 10px; font-size: 9px;">Il bordo tratteggiato dovrebbe essere<br>vicino ai bordi del foglio.</p>' +
+      '</div>' +
+      '</body>' +
+      '</html>';
   }
 
   // For tickets, use pre-rendered HTML from server
-  return job.html || `<html><body><pre>${JSON.stringify(job, null, 2)}</pre></body></html>`;
+  if (job.html) {
+    return job.html;
+  }
+
+  return '<html><body><pre>' + JSON.stringify(job, null, 2) + '</pre></body></html>';
 }
 
 function sendJobStatus(jobId, status, errorMessage) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'job_status',
-      payload: { jobId, status, errorMessage }
+      payload: { jobId: jobId, status: status, errorMessage: errorMessage }
     }));
   }
 }
@@ -382,12 +380,12 @@ ipcMain.handle('test-print', async () => {
     return false;
   }
 
-  // Use default ticket dimensions for local test
+  // Use standard receipt dimensions for local test
   handlePrintJob({ 
     type: 'test', 
     id: 'test-' + Date.now(),
     paperWidthMm: 80,
-    paperHeightMm: 150
+    paperHeightMm: 120
   });
   return true;
 });
