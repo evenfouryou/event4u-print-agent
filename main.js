@@ -1,404 +1,526 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const os = require('os');
 const WebSocket = require('ws');
 const Store = require('electron-store');
 
-const store = new Store();
+const log = require('electron-log');
+log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'event4u-print-agent.log');
+log.transports.file.level = 'debug';
+log.transports.console.level = 'debug';
 
-// HARDCODED SERVER URL
-const SERVER_URL = 'https://manage.eventfouryou.com';
-const WS_URL = 'wss://manage.eventfouryou.com/ws/print-agent';
-const API_URL = 'https://manage.eventfouryou.com/api/printers/agents/connect';
+const gotTheLock = app.requestSingleInstanceLock();
 
-let mainWindow;
-let tray;
-let ws;
-let reconnectTimer;
-let isConnected = false;
+if (!gotTheLock) {
+  log.info('Another instance is already running. Quitting...');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
+log.info('='.repeat(60));
+log.info('Event4U Print Agent starting at', new Date().toISOString());
+log.info('App version:', app.getVersion());
+log.info('Platform:', process.platform, process.arch);
+log.info('='.repeat(60));
+
+const store = new Store({
+  defaults: {
+    serverUrl: 'wss://manage.eventfouryou.com',
+    companyId: '',
+    authToken: '',
+    printerName: '',
+    autoConnect: true
+  }
+});
+
+let mainWindow = null;
+let relayWs = null;
+let relayReconnectTimer = null;
+let heartbeatTimer = null;
+let agentId = null;
+
+const HEARTBEAT_INTERVAL = 30000;
+const RECONNECT_DELAY = 5000;
+
+let currentStatus = {
+  connected: false,
+  printerReady: false,
+  printerName: null,
+  lastHeartbeat: null,
+  pendingJobs: 0
+};
+
+let logBuffer = [];
+const MAX_LOG_BUFFER = 200;
+
+function addLog(level, message) {
+  const entry = { timestamp: new Date().toISOString(), level, message };
+  logBuffer.push(entry);
+  if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
+  if (mainWindow?.webContents) {
+    mainWindow.webContents.send('log:entry', entry);
+  }
+}
+
+const originalInfo = log.info.bind(log);
+const originalWarn = log.warn.bind(log);
+const originalError = log.error.bind(log);
+
+log.info = (...args) => {
+  originalInfo(...args);
+  addLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+log.warn = (...args) => {
+  originalWarn(...args);
+  addLog('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+log.error = (...args) => {
+  originalError(...args);
+  addLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 500,
+    width: 800,
     height: 600,
-    resizable: false,
+    minWidth: 700,
+    minHeight: 500,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     },
-    icon: path.join(__dirname, 'icon.png')
+    icon: path.join(__dirname, 'icon.png'),
+    title: 'Event4U Print Agent'
   });
 
   mainWindow.loadFile('index.html');
-
-  mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+  
+  mainWindow.on('closed', () => {
+    mainWindow = null;
   });
 }
 
-function createTray() {
-  const icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
-  tray = new Tray(icon.resize({ width: 16, height: 16 }));
-  updateTrayMenu();
-  tray.on('click', () => mainWindow.show());
+function getDeviceName() {
+  return os.hostname();
 }
 
-function updateTrayMenu() {
-  if (!tray) return;
-
-  const statusLabel = isConnected ? '● Connesso' : '○ Disconnesso';
-
-  const contextMenu = Menu.buildFromTemplate([
-    { label: 'Event4U Print Agent v1.3', enabled: false },
-    { type: 'separator' },
-    { label: statusLabel, enabled: false },
-    { type: 'separator' },
-    { label: 'Apri Finestra', click: () => mainWindow.show() },
-    { label: 'Riconnetti', click: () => connectToServer(), enabled: !isConnected },
-    { type: 'separator' },
-    { label: 'Esci', click: () => { app.isQuitting = true; app.quit(); } }
-  ]);
-
-  tray.setToolTip('Event4U Print Agent v1.3 - ' + (isConnected ? 'Connesso' : 'Disconnesso'));
-  tray.setContextMenu(contextMenu);
-}
-
-async function connectToServer() {
-  const token = store.get('token');
-
-  if (!token) {
-    sendToRenderer('log', 'Token mancante');
-    sendToRenderer('status', 'disconnected');
-    return;
+async function registerAgent() {
+  const authToken = store.get('authToken');
+  
+  if (!authToken) {
+    log.warn('No auth token configured - generate one from the web portal first');
+    return null;
   }
 
-  sendToRenderer('log', 'Connessione in corso...');
-
+  const serverUrl = store.get('serverUrl').replace('wss://', 'https://').replace('ws://', 'http://');
+  
   try {
-    const response = await fetch(API_URL, {
+    // Use /connect endpoint which doesn't require session auth
+    // Only send token - companyId comes from server (security)
+    const response = await fetch(`${serverUrl}/api/printers/agents/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token })
+      body: JSON.stringify({ token: authToken })
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Errore sconosciuto' }));
-      sendToRenderer('log', 'Errore autenticazione: ' + (error.error || response.status));
-      sendToRenderer('status', 'error');
-      return;
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Connection failed: ${response.status}`);
     }
 
-    const data = await response.json();
-    sendToRenderer('log', 'Autenticato come: ' + (data.deviceName || data.agentId));
-    store.set('agentId', data.agentId);
-    store.set('companyId', data.companyId);
-
-    connectWebSocket(token, data.companyId, data.agentId);
-
+    const agent = await response.json();
+    log.info('Agent connected:', agent.agentId);
+    
+    agentId = agent.agentId;
+    // Store companyId from server response (trusted source)
+    store.set('companyId', agent.companyId);
+    
+    return agent;
   } catch (error) {
-    sendToRenderer('log', 'Errore connessione: ' + error.message);
-    sendToRenderer('status', 'error');
-    scheduleReconnect();
+    log.error('Registration error:', error.message);
+    return null;
   }
 }
 
-function connectWebSocket(token, companyId, agentId) {
-  if (ws) {
-    ws.close();
+function connectToRelay() {
+  const serverUrl = store.get('serverUrl');
+  const authToken = store.get('authToken');
+  const companyId = store.get('companyId');
+  
+  if (!companyId) {
+    log.warn('Cannot connect: no company ID configured');
+    updateStatus({ connected: false });
+    return;
   }
 
-  ws = new WebSocket(WS_URL);
+  if (relayWs) {
+    try { relayWs.close(); } catch (e) { }
+    relayWs = null;
+  }
 
-  ws.on('open', () => {
-    sendToRenderer('log', 'WebSocket connesso, autenticazione...');
+  log.info('Connecting to relay server:', serverUrl);
 
-    ws.send(JSON.stringify({
-      type: 'auth',
-      payload: {
-        token,
-        companyId,
-        agentId,
-        deviceName: store.get('deviceName') || 'Print Agent'
+  try {
+    relayWs = new WebSocket(`${serverUrl}/ws/print-agent`);
+
+    relayWs.on('open', () => {
+      log.info('Connected to relay server');
+      
+      relayWs.send(JSON.stringify({
+        type: 'auth',
+        payload: {
+          token: authToken,
+          companyId,
+          agentId,
+          deviceName: getDeviceName()
+        }
+      }));
+
+      updateStatus({ connected: true });
+      startHeartbeat();
+    });
+
+    relayWs.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        handleRelayMessage(message);
+      } catch (error) {
+        log.error('Failed to parse relay message:', error.message);
       }
-    }));
-  });
+    });
 
-  ws.on('message', (data) => {
-    try {
-      const message = JSON.parse(data.toString());
-      handleMessage(message);
-    } catch (e) {
-      sendToRenderer('log', 'Errore parsing messaggio: ' + e.message);
-    }
-  });
+    relayWs.on('close', () => {
+      log.warn('Relay connection closed');
+      updateStatus({ connected: false });
+      stopHeartbeat();
+      scheduleReconnect();
+    });
 
-  ws.on('close', () => {
-    sendToRenderer('log', 'WebSocket disconnesso');
-    sendToRenderer('status', 'disconnected');
-    isConnected = false;
-    updateTrayMenu();
+    relayWs.on('error', (error) => {
+      log.error('Relay connection error:', error.message);
+      updateStatus({ connected: false });
+    });
+  } catch (error) {
+    log.error('Failed to connect to relay:', error.message);
     scheduleReconnect();
-  });
-
-  ws.on('error', (error) => {
-    sendToRenderer('log', 'Errore WebSocket: ' + error.message);
-    sendToRenderer('status', 'error');
-  });
+  }
 }
 
-function handleMessage(message) {
+function handleRelayMessage(message) {
+  log.info('Relay message:', message.type);
+
   switch (message.type) {
     case 'auth_success':
-      sendToRenderer('log', 'Registrato! Agent ID: ' + message.agentId);
-      sendToRenderer('status', 'connected');
-      isConnected = true;
-      updateTrayMenu();
+      log.info('Authentication successful');
       break;
 
     case 'auth_error':
-      sendToRenderer('log', 'Errore autenticazione: ' + message.error);
-      sendToRenderer('status', 'error');
+      log.error('Authentication failed:', message.error);
       break;
 
     case 'print_job':
-      sendToRenderer('log', 'Lavoro di stampa ricevuto: ' + (message.payload?.id || 'unknown'));
       handlePrintJob(message.payload);
       break;
 
+    case 'ping':
+      relayWs?.send(JSON.stringify({ type: 'pong' }));
+      break;
+
     default:
-      sendToRenderer('log', 'Messaggio: ' + message.type);
+      log.warn('Unknown message type:', message.type);
   }
 }
 
 async function handlePrintJob(job) {
-  const printerName = store.get('printerName');
-
-  if (!printerName) {
-    sendToRenderer('log', 'Nessuna stampante configurata');
-    sendJobStatus(job.id, 'error', 'Nessuna stampante configurata');
-    return;
-  }
-
-  const paperWidthMm = job.paperWidthMm || 80;
-  const paperHeightMm = job.paperHeightMm || 150;
-
-  sendToRenderer('log', 'Stampa su: ' + printerName);
-  sendToRenderer('log', 'Dimensioni: ' + paperWidthMm + 'mm x ' + paperHeightMm + 'mm');
+  log.info('Received print job:', job.id);
+  updateStatus({ pendingJobs: currentStatus.pendingJobs + 1 });
 
   try {
-    const printers = await mainWindow.webContents.getPrintersAsync();
-    const printer = printers.find(p => p.name === printerName);
+    sendJobStatus(job.id, 'printing');
 
-    if (!printer) {
-      sendToRenderer('log', 'Stampante non trovata: ' + printerName);
-      sendJobStatus(job.id, 'error', 'Stampante non trovata');
-      return;
+    // job is the payload directly, not job.payload
+    const result = await printTicket(job);
+    
+    if (result.success) {
+      sendJobStatus(job.id, 'completed');
+      log.info('Print job completed:', job.id);
+    } else {
+      sendJobStatus(job.id, 'failed', result.error);
+      log.error('Print job failed:', job.id, result.error);
+    }
+  } catch (error) {
+    sendJobStatus(job.id, 'failed', error.message);
+    log.error('Print job error:', error.message);
+  }
+
+  updateStatus({ pendingJobs: Math.max(0, currentStatus.pendingJobs - 1) });
+}
+
+async function printTicket(payload) {
+  const printerName = store.get('printerName');
+  
+  if (!printerName) {
+    return { success: false, error: 'No printer configured' };
+  }
+
+  log.info('Printing to:', printerName);
+  log.info('Job type:', payload.type);
+  log.info('Paper size:', payload.paperWidthMm + 'x' + payload.paperHeightMm + 'mm');
+
+  // Create a hidden window for printing
+  let printWindow = null;
+  
+  try {
+    printWindow = new BrowserWindow({
+      width: 800,
+      height: 600,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    });
+
+    // Build the HTML content
+    let htmlContent;
+    
+    if (payload.type === 'ticket' && payload.html) {
+      // Use pre-rendered HTML from server
+      htmlContent = payload.html;
+    } else if (payload.type === 'test') {
+      // Generate test print HTML
+      const widthMm = payload.paperWidthMm || 80;
+      const heightMm = payload.paperHeightMm || 120;
+      htmlContent = '<!DOCTYPE html>' +
+        '<html><head><meta charset="utf-8">' +
+        '<style>' +
+        '@page { size: ' + widthMm + 'mm ' + heightMm + 'mm; margin: 0; }' +
+        '* { margin: 0; padding: 0; box-sizing: border-box; }' +
+        'body { ' +
+        '  width: ' + widthMm + 'mm; ' +
+        '  height: ' + heightMm + 'mm; ' +
+        '  font-family: Arial, sans-serif; ' +
+        '  padding: 5mm; ' +
+        '  -webkit-print-color-adjust: exact; ' +
+        '  print-color-adjust: exact; ' +
+        '}' +
+        '.border { ' +
+        '  border: 1px dashed #333; ' +
+        '  width: calc(100% - 4mm); ' +
+        '  height: calc(100% - 4mm); ' +
+        '  margin: 2mm; ' +
+        '  padding: 3mm; ' +
+        '}' +
+        'h1 { font-size: 14px; margin-bottom: 5mm; }' +
+        'p { font-size: 11px; margin-bottom: 2mm; }' +
+        '</style></head><body>' +
+        '<div class="border">' +
+        '<h1>Event4U Print Agent v1.4</h1>' +
+        '<p>Stampante: ' + printerName + '</p>' +
+        '<p>Data: ' + new Date().toLocaleString('it-IT') + '</p>' +
+        '<p>Dimensioni: ' + widthMm + 'mm x ' + heightMm + 'mm</p>' +
+        '<p style="margin-top:5mm;">Se vedi questo bordo tratteggiato vicino ai margini del foglio, la stampa funziona correttamente!</p>' +
+        '</div></body></html>';
+    } else {
+      return { success: false, error: 'Unknown print job type: ' + payload.type };
     }
 
-    if (job.type === 'ticket' || job.type === 'test') {
-      // Create hidden window - DON'T set size here, let CSS handle it
-      const printWindow = new BrowserWindow({ 
-        show: false,
-        webPreferences: {
-          nodeIntegration: false
-        }
-      });
+    // Load HTML content
+    await printWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
+    
+    // Wait for images/QR codes to load
+    await new Promise(resolve => setTimeout(resolve, 800));
 
-      const htmlContent = generatePrintHtml(job, paperWidthMm, paperHeightMm);
-      await printWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
-      
-      // Wait for content to render (images, QR codes)
-      await new Promise(resolve => setTimeout(resolve, 800));
+    // Calculate page size in microns (mm * 1000)
+    const widthMicrons = (payload.paperWidthMm || 80) * 1000;
+    const heightMicrons = (payload.paperHeightMm || 120) * 1000;
 
-      // Page size in microns (1mm = 1000 microns)
-      const pageWidthMicrons = paperWidthMm * 1000;
-      const pageHeightMicrons = paperHeightMm * 1000;
+    log.info('Page size in microns:', widthMicrons + 'x' + heightMicrons);
 
-      sendToRenderer('log', 'Page: ' + pageWidthMicrons + ' x ' + pageHeightMicrons + ' microns');
-
-      const printOptions = {
+    // Print with exact settings
+    return new Promise((resolve) => {
+      printWindow.webContents.print({
         silent: true,
         deviceName: printerName,
         printBackground: true,
-        color: true,
         margins: {
           marginType: 'none'
         },
         pageSize: {
-          width: pageWidthMicrons,
-          height: pageHeightMicrons
+          width: widthMicrons,
+          height: heightMicrons
         },
-        scaleFactor: 100,
-        landscape: false,
-        pagesPerSheet: 1
-      };
-
-      sendToRenderer('log', 'Invio a stampante...');
-
-      printWindow.webContents.print(printOptions, (success, errorType) => {
-        printWindow.close();
-
+        scaleFactor: 100
+      }, (success, failureReason) => {
+        if (printWindow) {
+          printWindow.close();
+          printWindow = null;
+        }
+        
         if (success) {
-          sendToRenderer('log', 'Stampa completata!');
-          sendJobStatus(job.id, 'completed');
+          log.info('Print completed successfully');
+          resolve({ success: true });
         } else {
-          sendToRenderer('log', 'Errore stampa: ' + errorType);
-          sendJobStatus(job.id, 'error', errorType);
+          log.error('Print failed:', failureReason);
+          resolve({ success: false, error: failureReason || 'Print failed' });
         }
       });
-    }
+    });
+
   } catch (error) {
-    sendToRenderer('log', 'Errore stampa: ' + error.message);
-    sendJobStatus(job.id, 'error', error.message);
+    log.error('Print error:', error.message);
+    if (printWindow) {
+      try { printWindow.close(); } catch (e) { }
+    }
+    return { success: false, error: error.message };
   }
 }
 
-function generatePrintHtml(job, paperWidthMm, paperHeightMm) {
-  // Convert mm to pixels at 96 DPI (standard screen DPI)
-  // 1 inch = 25.4mm, 96 DPI means 96/25.4 = 3.78 pixels per mm
-  const widthPx = Math.round(paperWidthMm * 3.78);
-  const heightPx = Math.round(paperHeightMm * 3.78);
+function sendJobStatus(jobId, status, errorMessage = null) {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return;
 
-  if (job.type === 'test') {
-    return '<!DOCTYPE html>' +
-      '<html>' +
-      '<head>' +
-      '<meta charset="utf-8">' +
-      '<style>' +
-      '@page { size: ' + paperWidthMm + 'mm ' + paperHeightMm + 'mm; margin: 0; }' +
-      '@media print { html, body { width: ' + paperWidthMm + 'mm; height: ' + paperHeightMm + 'mm; } }' +
-      '* { margin: 0; padding: 0; box-sizing: border-box; }' +
-      'html, body { ' +
-      '  width: ' + widthPx + 'px; ' +
-      '  height: ' + heightPx + 'px; ' +
-      '  margin: 0; padding: 0; ' +
-      '  overflow: hidden; ' +
-      '  -webkit-print-color-adjust: exact; ' +
-      '  print-color-adjust: exact; ' +
-      '}' +
-      '.border { ' +
-      '  position: absolute; ' +
-      '  top: 3px; left: 3px; right: 3px; bottom: 3px; ' +
-      '  border: 2px dashed #333; ' +
-      '}' +
-      '.content { ' +
-      '  position: absolute; ' +
-      '  top: 15px; left: 15px; ' +
-      '  font-family: Arial, sans-serif; ' +
-      '  font-size: 11px; ' +
-      '}' +
-      'h1 { font-size: 14px; margin-bottom: 8px; }' +
-      'p { margin: 4px 0; }' +
-      '</style>' +
-      '</head>' +
-      '<body>' +
-      '<div class="border"></div>' +
-      '<div class="content">' +
-      '<h1>Event4U Print Agent v1.3</h1>' +
-      '<p><strong>Stampante:</strong> ' + store.get('printerName') + '</p>' +
-      '<p><strong>Dimensioni:</strong> ' + paperWidthMm + 'mm x ' + paperHeightMm + 'mm</p>' +
-      '<p><strong>Pixel:</strong> ' + widthPx + ' x ' + heightPx + '</p>' +
-      '<p><strong>Data:</strong> ' + new Date().toLocaleString('it-IT') + '</p>' +
-      '<p><strong>Status:</strong> OK</p>' +
-      '<p style="margin-top: 10px; font-size: 9px;">Il bordo tratteggiato dovrebbe essere<br>vicino ai bordi del foglio.</p>' +
-      '</div>' +
-      '</body>' +
-      '</html>';
-  }
-
-  // For tickets, use pre-rendered HTML from server
-  if (job.html) {
-    return job.html;
-  }
-
-  return '<html><body><pre>' + JSON.stringify(job, null, 2) + '</pre></body></html>';
+  relayWs.send(JSON.stringify({
+    type: 'job_status',
+    payload: {
+      jobId,
+      status,
+      errorMessage
+    }
+  }));
 }
 
-function sendJobStatus(jobId, status, errorMessage) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'job_status',
-      payload: { jobId: jobId, status: status, errorMessage: errorMessage }
-    }));
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (relayWs?.readyState === WebSocket.OPEN) {
+      relayWs.send(JSON.stringify({
+        type: 'heartbeat',
+        payload: {
+          agentId,
+          status: currentStatus.printerReady ? 'online' : 'error',
+          printerName: currentStatus.printerName
+        }
+      }));
+      updateStatus({ lastHeartbeat: new Date().toISOString() });
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
   }
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-
-  reconnectTimer = setTimeout(() => {
-    sendToRenderer('log', 'Riconnessione...');
-    connectToServer();
-  }, 5000);
+  if (relayReconnectTimer) return;
+  
+  log.info(`Reconnecting in ${RECONNECT_DELAY / 1000}s...`);
+  relayReconnectTimer = setTimeout(() => {
+    relayReconnectTimer = null;
+    connectToRelay();
+  }, RECONNECT_DELAY);
 }
 
-function sendToRenderer(channel, data) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, data);
+function updateStatus(updates) {
+  Object.assign(currentStatus, updates);
+  if (mainWindow?.webContents) {
+    mainWindow.webContents.send('status:update', currentStatus);
   }
 }
 
-// IPC handlers
-ipcMain.handle('save-config', (event, config) => {
-  store.set('token', config.token);
-  store.set('deviceName', config.deviceName);
-  store.set('printerName', config.printerName);
-  sendToRenderer('log', 'Configurazione salvata');
-  return true;
-});
-
 ipcMain.handle('get-config', () => {
   return {
-    token: store.get('token') || '',
-    deviceName: store.get('deviceName') || '',
-    printerName: store.get('printerName') || '',
-    serverUrl: SERVER_URL
+    serverUrl: store.get('serverUrl'),
+    companyId: store.get('companyId'),
+    printerName: store.get('printerName'),
+    autoConnect: store.get('autoConnect')
   };
 });
 
-ipcMain.handle('connect', () => {
-  connectToServer();
+ipcMain.handle('save-config', async (event, config) => {
+  store.set('serverUrl', config.serverUrl);
+  store.set('companyId', config.companyId);
+  store.set('printerName', config.printerName);
+  store.set('autoConnect', config.autoConnect);
+  
+  updateStatus({ printerName: config.printerName, printerReady: !!config.printerName });
+  
+  log.info('Configuration saved');
+  return { success: true };
+});
+
+ipcMain.handle('get-status', () => currentStatus);
+
+ipcMain.handle('get-logs', () => logBuffer);
+
+ipcMain.handle('connect', async () => {
+  const agent = await registerAgent();
+  if (agent) {
+    connectToRelay();
+    return { success: true };
+  }
+  return { success: false, error: 'Registration failed' };
 });
 
 ipcMain.handle('disconnect', () => {
-  if (ws) ws.close();
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  sendToRenderer('status', 'disconnected');
-});
-
-ipcMain.handle('get-printers', async () => {
-  const printers = await mainWindow.webContents.getPrintersAsync();
-  return printers.map(p => ({ name: p.name, isDefault: p.isDefault }));
+  if (relayWs) {
+    relayWs.close();
+    relayWs = null;
+  }
+  stopHeartbeat();
+  updateStatus({ connected: false });
+  return { success: true };
 });
 
 ipcMain.handle('test-print', async () => {
   const printerName = store.get('printerName');
   if (!printerName) {
-    sendToRenderer('log', 'Seleziona una stampante');
-    return false;
+    return { success: false, error: 'No printer configured' };
   }
-
-  // Use standard receipt dimensions for local test
-  handlePrintJob({ 
-    type: 'test', 
-    id: 'test-' + Date.now(),
+  
+  log.info('Local test print requested');
+  
+  // Use the same printTicket function with test type
+  const result = await printTicket({
+    type: 'test',
     paperWidthMm: 80,
     paperHeightMm: 120
   });
-  return true;
+  
+  return result;
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
-  createTray();
 
-  const token = store.get('token');
-  const companyId = store.get('companyId');
-  if (token && companyId) {
-    setTimeout(connectToServer, 1000);
+  const config = store.store;
+  updateStatus({
+    printerName: config.printerName,
+    printerReady: !!config.printerName
+  });
+
+  if (config.autoConnect && config.companyId) {
+    log.info('Auto-connecting...');
+    const agent = await registerAgent();
+    if (agent) {
+      connectToRelay();
+    }
   }
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
 });
 
 app.on('window-all-closed', () => {
@@ -407,13 +529,9 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
-});
-
 app.on('before-quit', () => {
-  if (ws) ws.close();
-  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (relayWs) {
+    relayWs.close();
+  }
+  stopHeartbeat();
 });
