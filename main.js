@@ -192,10 +192,21 @@ async function handlePrintJob(job) {
       const htmlContent = generatePrintHtml(job);
       await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
       
+      // Set page size from job dimensions (convert mm to microns for Electron)
+      const pageWidth = (job.paperWidthMm || 80) * 1000; // microns
+      const pageHeight = (job.paperHeightMm || 150) * 1000; // microns
+      
       printWindow.webContents.print({
         silent: true,
         deviceName: printerName,
-        printBackground: true
+        printBackground: true,
+        pageSize: {
+          width: pageWidth,
+          height: pageHeight
+        },
+        margins: {
+          marginType: 'none'
+        }
       }, (success, errorType) => {
         printWindow.close();
         
