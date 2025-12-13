@@ -41,17 +41,29 @@ function createWindow() {
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  updateTrayMenu();
+  tray.on('click', () => mainWindow.show());
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  
+  const statusLabel = isConnected ? '● Connesso' : '○ Disconnesso';
+  const statusColor = isConnected ? 'green' : 'gray';
   
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Apri', click: () => mainWindow.show() },
-    { label: 'Stato', sublabel: isConnected ? 'Connesso' : 'Disconnesso' },
+    { label: 'Event4U Print Agent', enabled: false },
+    { type: 'separator' },
+    { label: statusLabel, enabled: false },
+    { type: 'separator' },
+    { label: 'Apri Finestra', click: () => mainWindow.show() },
+    { label: 'Riconnetti', click: () => connectToServer(), enabled: !isConnected },
     { type: 'separator' },
     { label: 'Esci', click: () => { app.isQuitting = true; app.quit(); } }
   ]);
   
-  tray.setToolTip('Event4U Print Agent');
+  tray.setToolTip(`Event4U Print Agent - ${isConnected ? 'Connesso' : 'Disconnesso'}`);
   tray.setContextMenu(contextMenu);
-  tray.on('click', () => mainWindow.show());
 }
 
 async function connectToServer() {
@@ -129,6 +141,7 @@ function connectWebSocket(token, companyId, agentId) {
     sendToRenderer('log', 'WebSocket disconnesso');
     sendToRenderer('status', 'disconnected');
     isConnected = false;
+    updateTrayMenu();
     scheduleReconnect();
   });
   
@@ -144,6 +157,7 @@ function handleMessage(message) {
       sendToRenderer('log', `Registrato! Agent ID: ${message.agentId}`);
       sendToRenderer('status', 'connected');
       isConnected = true;
+      updateTrayMenu();
       break;
       
     case 'auth_error':
