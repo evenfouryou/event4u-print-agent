@@ -1,8 +1,47 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
+const https = require('https');
+const http = require('http');
 const WebSocket = require('ws');
 const Store = require('electron-store');
+
+// Simple HTTP request function that works on all platforms
+function httpRequest(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    
+    const reqOptions = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || 'GET',
+      headers: options.headers || {}
+    };
+    
+    const req = lib.request(reqOptions, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: () => Promise.resolve(JSON.parse(data)),
+          text: () => Promise.resolve(data)
+        });
+      });
+    });
+    
+    req.on('error', reject);
+    
+    if (options.body) {
+      req.write(options.body);
+    }
+    req.end();
+  });
+}
 
 const log = require('electron-log');
 log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'event4u-print-agent.log');
@@ -124,7 +163,7 @@ async function registerAgent() {
   try {
     // Use /connect endpoint which doesn't require session auth
     // Only send token - companyId comes from server (security)
-    const response = await fetch(`${serverUrl}/api/printers/agents/connect`, {
+    const response = await httpRequest(`${serverUrl}/api/printers/agents/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: authToken })
