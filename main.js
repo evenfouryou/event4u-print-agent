@@ -29,13 +29,24 @@ async function electronFetch(url, options = {}) {
         resolve({
           ok: response.statusCode >= 200 && response.statusCode < 300,
           status: response.statusCode,
-          json: () => Promise.resolve(JSON.parse(responseData)),
+          json: () => {
+            try {
+              if (!responseData || responseData.trim() === '') {
+                return Promise.resolve({});
+              }
+              return Promise.resolve(JSON.parse(responseData));
+            } catch (e) {
+              log.error('JSON parse error:', e.message, 'Body:', responseData);
+              return Promise.resolve({ error: 'Invalid JSON response' });
+            }
+          },
           text: () => Promise.resolve(responseData)
         });
       });
     });
     
     request.on('error', (error) => {
+      log.error('Network error:', error.message);
       reject(error);
     });
     
