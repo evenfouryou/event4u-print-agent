@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function loadConfig() {
     const config = await window.printAgent.getConfig();
-    serverUrlInput.value = config.serverUrl || '';
+    serverUrlInput.value = config.serverUrl || 'wss://manage.eventfouryou.com';
     companyIdInput.value = config.companyId || '';
     authTokenInput.value = config.authToken || '';
     printerNameInput.value = config.printerName || '';
@@ -143,7 +143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     e.preventDefault();
     
     const config = {
-      serverUrl: serverUrlInput.value.trim(),
+      serverUrl: serverUrlInput.value.trim() || 'wss://manage.eventfouryou.com',
       companyId: companyIdInput.value.trim(),
       authToken: authTokenInput.value.trim(),
       printerName: printerNameInput.value.trim(),
