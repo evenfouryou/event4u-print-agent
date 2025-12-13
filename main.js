@@ -524,12 +524,14 @@ ipcMain.handle('get-config', () => {
 ipcMain.handle('save-config', async (event, config) => {
   store.set('serverUrl', config.serverUrl);
   store.set('companyId', config.companyId);
+  store.set('authToken', config.authToken);
   store.set('printerName', config.printerName);
   store.set('autoConnect', config.autoConnect);
   
+  log.info('Configuration saved - Token:', config.authToken ? 'SET' : 'EMPTY');
+  
   updateStatus({ printerName: config.printerName, printerReady: !!config.printerName });
   
-  log.info('Configuration saved');
   return { success: true };
 });
 
