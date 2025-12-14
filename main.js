@@ -415,22 +415,38 @@ async function printTicket(payload) {
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Calculate page size in microns (mm * 1000)
-    const widthMicrons = (payload.paperWidthMm || 80) * 1000;
-    const heightMicrons = (payload.paperHeightMm || 120) * 1000;
+    const originalWidthMicrons = (payload.paperWidthMm || 80) * 1000;
+    const originalHeightMicrons = (payload.paperHeightMm || 120) * 1000;
     
     // Determine if landscape orientation should be used
     const isLandscape = payload.orientation === 'landscape';
+    
+    // For thermal printers, the landscape flag alone may not work
+    // We need to swap width/height when using landscape orientation
+    // This ensures the printer receives the correct physical dimensions
+    let widthMicrons, heightMicrons;
+    if (isLandscape) {
+      // Swap dimensions for landscape: paper rotated 90 degrees
+      widthMicrons = originalHeightMicrons;
+      heightMicrons = originalWidthMicrons;
+      log.info('Landscape mode: swapped dimensions for thermal printer');
+    } else {
+      widthMicrons = originalWidthMicrons;
+      heightMicrons = originalHeightMicrons;
+    }
 
-    log.info('Page size in microns:', widthMicrons + 'x' + heightMicrons);
+    log.info('Original size:', originalWidthMicrons + 'x' + originalHeightMicrons + ' microns');
+    log.info('Final page size:', widthMicrons + 'x' + heightMicrons + ' microns');
     log.info('Using landscape mode:', isLandscape);
 
     // Print with exact settings
+    // For thermal printers: swap dimensions AND set landscape flag
     return new Promise((resolve) => {
       printWindow.webContents.print({
         silent: true,
         deviceName: printerName,
         printBackground: true,
-        landscape: isLandscape,
+        landscape: isLandscape, // Set flag AND swap dimensions for thermal printers
         margins: {
           marginType: 'none'
         },
