@@ -421,8 +421,13 @@ async function printTicket(payload) {
     // Determine if landscape orientation should be used
     const isLandscape = payload.orientation === 'landscape';
 
+    // Swap dimensions for landscape mode
+    const pageWidth = isLandscape ? heightMicrons : widthMicrons;
+    const pageHeight = isLandscape ? widthMicrons : heightMicrons;
+
     log.info('Page size in microns:', widthMicrons + 'x' + heightMicrons);
     log.info('Using landscape mode:', isLandscape);
+    log.info('Final page dimensions:', pageWidth + 'x' + pageHeight);
 
     // Print with exact settings
     return new Promise((resolve) => {
@@ -435,8 +440,8 @@ async function printTicket(payload) {
           marginType: 'none'
         },
         pageSize: {
-          width: widthMicrons,
-          height: heightMicrons
+          width: pageWidth,
+          height: pageHeight
         },
         scaleFactor: 100
       }, (success, failureReason) => {
