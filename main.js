@@ -538,6 +538,7 @@ ipcMain.handle('get-config', () => {
   return {
     serverUrl: store.get('serverUrl'),
     companyId: store.get('companyId'),
+    authToken: store.get('authToken'),
     printerName: store.get('printerName'),
     autoConnect: store.get('autoConnect')
   };
