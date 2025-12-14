@@ -348,6 +348,7 @@ async function printTicket(payload) {
   log.info('Printing to:', printerName);
   log.info('Job type:', payload.type);
   log.info('Paper size:', payload.paperWidthMm + 'x' + payload.paperHeightMm + 'mm');
+  log.info('Orientation:', payload.orientation || 'auto');
 
   // Create a hidden window for printing
   let printWindow = null;
@@ -416,8 +417,12 @@ async function printTicket(payload) {
     // Calculate page size in microns (mm * 1000)
     const widthMicrons = (payload.paperWidthMm || 80) * 1000;
     const heightMicrons = (payload.paperHeightMm || 120) * 1000;
+    
+    // Determine if landscape orientation should be used
+    const isLandscape = payload.orientation === 'landscape';
 
     log.info('Page size in microns:', widthMicrons + 'x' + heightMicrons);
+    log.info('Using landscape mode:', isLandscape);
 
     // Print with exact settings
     return new Promise((resolve) => {
@@ -425,6 +430,7 @@ async function printTicket(payload) {
         silent: true,
         deviceName: printerName,
         printBackground: true,
+        landscape: isLandscape,
         margins: {
           marginType: 'none'
         },
