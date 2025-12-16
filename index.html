@@ -61,6 +61,17 @@
           <h2>Configurazione</h2>
           <form id="configForm">
             <div class="form-group">
+              <label for="serverType">Server</label>
+              <div class="server-selector">
+                <select id="serverType">
+                  <option value="production">Produzione (manage.eventfouryou.com)</option>
+                  <option value="development">Sviluppo (Replit)</option>
+                </select>
+                <button type="button" id="btnSwitchServer" class="btn btn-secondary">Cambia Server</button>
+              </div>
+              <small id="currentServerUrl">Server attuale: wss://manage.eventfouryou.com</small>
+            </div>
+            <div class="form-group">
               <label for="authToken">Token Autenticazione</label>
               <input type="text" id="authToken" placeholder="Incolla qui il token dalla pagina admin">
               <small>Copia il token dalla sezione "Gestione Stampanti" nell'app web</small>

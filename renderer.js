@@ -14,6 +14,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   const configForm = document.getElementById('configForm');
   const serverUrlInput = document.getElementById('serverUrl');
+  const serverTypeSelect = document.getElementById('serverType');
+  const btnSwitchServer = document.getElementById('btnSwitchServer');
+  const currentServerUrlLabel = document.getElementById('currentServerUrl');
   const companyIdInput = document.getElementById('companyId');
   const authTokenInput = document.getElementById('authToken');
   const printerNameInput = document.getElementById('printerName');
@@ -35,6 +38,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadConfig() {
     const config = await window.printAgent.getConfig();
     serverUrlInput.value = config.serverUrl || 'wss://manage.eventfouryou.com';
+    serverTypeSelect.value = config.serverType || 'production';
+    currentServerUrlLabel.textContent = 'Server attuale: ' + (config.serverUrl || 'wss://manage.eventfouryou.com');
     companyIdInput.value = config.companyId || '';
     authTokenInput.value = config.authToken || '';
     printerNameInput.value = config.printerName || '';
@@ -102,6 +107,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.printAgent.onStatusUpdate(updateStatusUI);
   window.printAgent.onLogEntry(addLogEntry);
 
+  btnSwitchServer.addEventListener('click', async () => {
+    const selectedType = serverTypeSelect.value;
+    btnSwitchServer.disabled = true;
+    btnSwitchServer.textContent = 'Cambio...';
+    
+    const result = await window.printAgent.switchServer(selectedType);
+    
+    if (result.success) {
+      serverUrlInput.value = result.serverUrl;
+      currentServerUrlLabel.textContent = 'Server attuale: ' + result.serverUrl;
+      alert('Server cambiato a: ' + (selectedType === 'production' ? 'Produzione' : 'Sviluppo'));
+    } else {
+      alert('Errore cambio server: ' + (result.error || 'Errore sconosciuto'));
+    }
+    
+    btnSwitchServer.disabled = false;
+    btnSwitchServer.textContent = 'Cambia Server';
+    
+    const status = await window.printAgent.getStatus();
+    updateStatusUI(status);
+  });
+
   btnConnect.addEventListener('click', async () => {
     btnConnect.disabled = true;
     btnConnect.textContent = 'Connessione...';
@@ -144,6 +171,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     const config = {
       serverUrl: serverUrlInput.value.trim() || 'wss://manage.eventfouryou.com',
+      serverType: serverTypeSelect.value || 'production',
       companyId: companyIdInput.value.trim(),
       authToken: authTokenInput.value.trim(),
       printerName: printerNameInput.value.trim(),

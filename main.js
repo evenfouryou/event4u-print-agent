@@ -68,9 +68,16 @@ log.info('App version:', app.getVersion());
 log.info('Platform:', process.platform, process.arch);
 log.info('='.repeat(60));
 
+// Available servers for connection
+const AVAILABLE_SERVERS = {
+  production: 'wss://manage.eventfouryou.com',
+  development: 'wss://event4u-management-system-evenfouryou.replit.app'
+};
+
 const store = new Store({
   defaults: {
-    serverUrl: 'wss://manage.eventfouryou.com',
+    serverUrl: AVAILABLE_SERVERS.production,
+    serverType: 'production',
     companyId: '',
     authToken: '',
     printerName: '',
@@ -537,6 +544,7 @@ function updateStatus(updates) {
 ipcMain.handle('get-config', () => {
   return {
     serverUrl: store.get('serverUrl'),
+    serverType: store.get('serverType'),
     companyId: store.get('companyId'),
     authToken: store.get('authToken'),
     printerName: store.get('printerName'),
@@ -544,8 +552,35 @@ ipcMain.handle('get-config', () => {
   };
 });
 
+ipcMain.handle('get-available-servers', () => {
+  return AVAILABLE_SERVERS;
+});
+
+ipcMain.handle('switch-server', async (event, serverType) => {
+  if (!AVAILABLE_SERVERS[serverType]) {
+    return { success: false, error: 'Invalid server type' };
+  }
+  
+  const newServerUrl = AVAILABLE_SERVERS[serverType];
+  store.set('serverType', serverType);
+  store.set('serverUrl', newServerUrl);
+  
+  log.info(`Server switched to ${serverType}: ${newServerUrl}`);
+  
+  // Disconnect from current server if connected
+  if (relayWs) {
+    relayWs.close();
+    relayWs = null;
+    stopHeartbeat();
+    updateStatus({ connected: false });
+  }
+  
+  return { success: true, serverUrl: newServerUrl, serverType };
+});
+
 ipcMain.handle('save-config', async (event, config) => {
   store.set('serverUrl', config.serverUrl);
+  store.set('serverType', config.serverType || 'production');
   store.set('companyId', config.companyId);
   store.set('authToken', config.authToken);
   store.set('printerName', config.printerName);

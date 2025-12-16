@@ -213,6 +213,32 @@ main {
   margin-bottom: 0.5rem;
 }
 
+.server-selector {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.server-selector select {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 0.9375rem;
+  cursor: pointer;
+}
+
+.server-selector select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.server-selector .btn {
+  white-space: nowrap;
+}
+
 .form-group input[type="text"] {
   width: 100%;
   padding: 0.75rem 1rem;
