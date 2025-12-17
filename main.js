@@ -71,7 +71,7 @@ log.info('='.repeat(60));
 // Available servers for connection
 const AVAILABLE_SERVERS = {
   production: 'wss://manage.eventfouryou.com',
-  development: 'wss://event4u-management-system-evenfouryou.replit.app'
+  development: 'wss://1e140314-d94a-4320-bb5f-edbf06f7b556-00-3atrzxa6r3x8c.kirk.replit.dev'
 };
 
 const store = new Store({
