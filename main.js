@@ -91,8 +91,8 @@ let relayReconnectTimer = null;
 let heartbeatTimer = null;
 let agentId = null;
 
-const HEARTBEAT_INTERVAL = 30000;
-const RECONNECT_DELAY = 5000;
+const HEARTBEAT_INTERVAL = 15000; // Reduced from 30s to keep connection alive through proxies
+const RECONNECT_DELAY = 3000; // Faster reconnection
 
 let currentStatus = {
   connected: false,
